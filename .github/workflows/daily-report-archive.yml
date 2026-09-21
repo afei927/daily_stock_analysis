@@ -1,0 +1,72 @@
+name: 归档每日分析报告
+
+# 在「每日股票分析」成功完成后，把该次运行的 reports/ 产物按天提交到 main 的
+# daily_reports/<YYYY-MM-DD>/ 目录，便于在仓库中直接查看历史。
+#
+# 说明：
+# - 仅当上游工作流结论为 success 时归档（失败的运行不提交）。
+# - 使用 workflow_run 复用分析产物，不重复执行分析逻辑。
+# - 本文件必须位于默认分支（main）上，workflow_run 才会被触发。
+
+on:
+  workflow_run:
+    workflows: ["每日股票分析"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: daily-report-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: 下载该次运行的分析产物
+        uses: actions/download-artifact@v4
+        with:
+          name: analysis-reports-${{ github.event.workflow_run.run_number }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: _artifact
+
+      - name: 按天整理报告
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d _artifact/reports ]; then
+            echo "产物中没有 reports/ 目录，跳过归档"
+            exit 0
+          fi
+          run_date='${{ github.event.workflow_run.created_at }}'
+          run_date="${run_date%%T*}"
+          if [ -z "$run_date" ]; then
+            run_date="$(date -u +%F)"
+          fi
+          mkdir -p "daily_reports/$run_date"
+          cp -a _artifact/reports/. "daily_reports/$run_date/"
+          echo "已归档到 daily_reports/$run_date:"
+          ls -la "daily_reports/$run_date"
+
+      - name: 提交并推送
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add daily_reports
+          if git diff --cached --quiet; then
+            echo "无新增报告，跳过提交"
+            exit 0
+          fi
+          git commit -m "chore: archive daily analysis reports ($(date -u +%F))"
+          git push origin HEAD:main
