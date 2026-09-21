@@ -46,7 +46,7 @@
 - `AGENTS.md` 是仓库内 AI 协作规则的唯一真源。
 - `CLAUDE.md` 必须是指向 `AGENTS.md` 的软链接，用于兼容 Claude 生态。
 - `.github/copilot-instructions.md` 与 `.github/instructions/*.instructions.md` 是 GitHub Copilot / Coding Agent 的镜像或分层补充；若与本文件冲突，以 `AGENTS.md` 为准。
-- 仓库协作 skill 存放在 `.claude/skills/`，分析产物存放在 `.claude/reviews/`；前者可以入库，后者默认视为本地产物。
+- 仓库协作 skill 存放在 `.claude/skills/`，分析产物存放在 `.claude/reviews/`；`.gitignore` 忽略 `.claude/*` 但放行 `.claude/skills/**`，因此只有 skills 可以入库，`.claude/reviews/` 属本地产物，不得提交。
 - 根目录 `SKILL.md` 与 `docs/openclaw-skill-integration.md` 属于产品或外部集成说明，不是仓库协作规则真源。
 - 若未来新增 `.agents/skills/` 或其他 agent 专用目录，必须先明确单一真源，再通过脚本或镜像同步；禁止手工长期维护多份同义内容。
 - 修改 AI 协作治理资产时，执行：
@@ -57,65 +57,83 @@ python scripts/check_ai_assets.py
 
 ## 3. 仓库速览
 
-- 项目定位：股票智能分析系统，覆盖 A 股、港股、美股。
+- 项目定位：基于 LLM 的 A股/港股/美股/日股/韩股/台股自选股分析系统，产出「决策仪表盘」并推送到通知渠道。
 - 主流程：抓取数据 -> 技术分析/新闻检索 -> LLM 分析 -> 生成报告 -> 通知推送。
 - 关键入口：
-  - `main.py`：分析任务主入口
-  - `server.py`：FastAPI 服务入口
-  - `apps/dsa-web/`：Web 前端
-  - `apps/dsa-desktop/`：Electron 桌面端
+  - `main.py`：分析任务主入口（CLI 模式分发）
+  - `server.py`：FastAPI 服务入口（导出 `api.app:app`）
+  - `webui.py`：Web 服务启动脚本（等价 `main.py --webui-only`）
+  - `apps/dsa-web/`：Web 前端（Vite + React 19 + TS）
+  - `apps/dsa-desktop/`：Electron 桌面端（electron-builder 打包）
   - `.github/workflows/`：CI、发布、每日任务
-- 核心职责：
-  - `src/core/`：主流程编排
-  - `src/services/`：业务服务层
+- 后端职责：
+  - `src/core/`：主流程编排（`pipeline.py`）、配置管理、大盘复盘、回测、交易日历
+  - `src/services/`：业务服务层（分析/告警/组合/决策信号/选股等，约 60 个模块）
   - `src/repositories/`：数据访问层
-  - `src/reports/`：报告生成
   - `src/schemas/`：Schema / 数据结构
-  - `data_provider/`：多数据源适配与 fallback
-  - `api/`：FastAPI API
-  - `bot/`：机器人接入
-  - `scripts/`：本地脚本
-  - `.github/scripts/`：GitHub 自动化脚本
-  - `tests/`：pytest 测试
-  - `docs/`：文档与说明
+  - `src/agent/`：Agent 策略问股（多轮会话、多 Agent 编排、Codex/LiteLLM backend）
+  - `src/llm/`：LLM backend 适配与注册
+  - `src/notification_sender/`：各通知渠道 sender
+  - `src/brokers/futu/`：Futu OpenD 接入
+  - `src/patches/`：三方库运行时 patch（如 eastmoney）
+  - 报告渲染：`src/formatters.py`、`src/report_language.py`、`src/md2img.py`、`src/share_image.py` + `templates/*.j2`（**没有 `src/reports/` 目录**）
+  - `data_provider/`：多数据源适配与 fallback（`DataFetcherManager`）
+  - `api/`：FastAPI 应用（`app.py`、`v1/router.py`、`v1/endpoints/`、`v1/schemas/`、`middlewares/`）
+  - `bot/`：机器人接入（`dispatcher.py`、`commands/`、`platforms/`）
+  - `strategies/`：内置策略 YAML；`templates/`：Jinja2 报告模板；`evals/agent_trajectory/`：Agent 轨迹评估
+  - `scripts/`：本地脚本（`test.sh`、`ci_gate.sh`、`check_ai_assets.py` 等）；`.github/scripts/`：GitHub 自动化脚本
+  - `tests/`：pytest 测试；`docs/`：文档与说明，入口 `docs/INDEX.md`；`docker/`：Dockerfile / compose / entrypoint
+- 大文件提示（避免整文件读取，优先 grep / 定向读取）：
+  - `src/analyzer.py`(~216KB)、`src/search_service.py`(~189KB)、`src/config.py`(~168KB)、`src/storage.py`(~167KB)、`src/notification.py`(~130KB)、`main.py`(~71KB)
+  - `docs/full-guide.md`(~198KB)、`docs/CHANGELOG.md`(~241KB)、`.env.example`(~52KB)
 
 ## 4. 常用命令
 
 ### 运行应用
 
 ```bash
-python main.py
+python main.py                        # 全量分析（含大盘复盘）
 python main.py --debug
 python main.py --dry-run
-python main.py --stocks 600519,hk00700,AAPL
-python main.py --market-review
-python main.py --schedule
-python main.py --serve
-python main.py --serve-only
+python main.py --stocks 600519,hk00700,AAPL,2330.TW
+python main.py --market-review        # 仅大盘复盘
+python main.py --schedule             # 本地定时任务
+python main.py --backtest             # 回测历史分析结果
+python main.py --webui                # Web 管理界面 + 执行分析
+python main.py --webui-only           # 仅启动 Web 管理界面
+python main.py --serve-only           # 仅启动 FastAPI 后端（无 Web UI）
 uvicorn server:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### 后端验证
 
 ```bash
-pip install -r requirements.txt
-pip install flake8 pytest
-./scripts/ci_gate.sh
-python -m pytest -m "not network"
+pip install -r requirements.txt          # CI 实际用 .github/requirements-ci.txt（含 flake8/pytest/pytest-timeout）
+./scripts/ci_gate.sh                     # syntax + flake8 + deterministic + 离线 pytest
+./scripts/ci_gate.sh offline-tests       # 仅离线测试套件
+python -m pytest -m "not network"        # 离线套件（marker：unit / integration / network）
+python -m pytest tests/test_x.py::test_y # 单个测试
+./scripts/test.sh code                   # 离线：股票代码识别
+./scripts/test.sh yfinance               # 离线：YFinance 代码转换
 python -m py_compile <changed_python_files>
 ```
+
+> `./scripts/test.sh quick|market|a-stock|hk-stock|us-stock|...` 需要网络/API Key，不是离线 gate，不要在无网络环境当作验证。
 
 ### Web / Desktop
 
 ```bash
-cd apps/dsa-web
+cd apps/dsa-web                # Node >=20.19 <27
 npm ci
-npm run lint
-npm run build
+npm run lint                   # eslint .
+npm run build                  # tsc -b && vite build（类型检查在 build 内）
+npm run test                   # vitest run
+npm run test:smoke             # playwright（e2e/）
 
 cd ../dsa-desktop
 npm install
-npm run build
+npm test                       # node --test tests/*.test.js
+npm run build                  # electron-builder（需先构建 Web 与冻结后端）
 ```
 
 ### PR / CI 证据
@@ -152,8 +170,9 @@ gh run view <run_id> --log-failed
 | 检查项 | 来源 | 说明 | 是否阻断 |
 | --- | --- | --- | --- |
 | `ai-governance` | `.github/workflows/ci.yml` | 校验 `AGENTS.md` / `CLAUDE.md` / `.github` 指令 / `.claude/skills` 关系 | 是 |
-| `backend-gate` | `.github/workflows/ci.yml` | 执行 `./scripts/ci_gate.sh` | 是 |
+| `backend-tests` (3 shard) + `backend-gate` | `.github/workflows/ci.yml` | 分 3 片执行 `./scripts/ci_gate.sh`（syntax/flake8/deterministic/离线 pytest），`backend-gate` 汇总判定 | 是 |
 | `docker-build` | `.github/workflows/ci.yml` | Docker 构建与关键模块导入 smoke | 是 |
+| `desktop-futu-package-windows/macos` | `.github/workflows/ci.yml` | Futu 相关改动时构建并验证冻结后端与桌面包 | 是（触发时） |
 | `web-gate` | `.github/workflows/ci.yml` | 前端改动时执行 `npm run lint` + `npm run build` | 是（触发时） |
 | `network-smoke` | `.github/workflows/network-smoke.yml` | `pytest -m network` + `scripts/test.sh quick` | 否，观测项 |
 | `pr-review` | `.github/workflows/pr-review.yml` | PR 静态检查 + AI 审查 + 自动标签 | 否，辅助项 |
